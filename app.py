@@ -34,22 +34,28 @@ st.markdown("""
 """)
 
 ###############################################################
-# Sidebar - 參數設定
+# 頁面上方條件控制區（取代 Sidebar）
 ###############################################################
-st.sidebar.header("參數設定")
+st.subheader("⚙️ 參數設定（Conditions）")
 
-# 預設起始日設為 2015 以確保有足夠的 00631L 資料 (00631L 成立於 2014)
-start_date = st.sidebar.date_input("開始日", pd.to_datetime("2015-01-01"))
-end_date   = st.sidebar.date_input("結束日", pd.to_datetime("today"))
+colA, colB, colC = st.columns(3)
+with colA:
+    start_date = st.date_input("開始日期", pd.to_datetime("2010-01-01"))
+with colB:
+    end_date = st.date_input("結束日期", pd.to_datetime("today"))
+with colC:
+    sma_window = st.slider("SMA 週期", 50, 250, 200)
 
-st.sidebar.subheader("延遲分析參數")
-lag_min = st.sidebar.number_input("最小 lag", -10, 0, -5)
-lag_max = st.sidebar.number_input("最大 lag", 0, 10, 5)
-drop_thresh = st.sidebar.number_input("大跌閾值 (%)", -20.0, 0.0, -2.0, step=0.5, help="設定當日跌幅超過多少視為大跌事件 (輸入負值)")
-event_window = st.sidebar.slider("事件前後天數", 1, 10, 3)
+colD, colE, colF = st.columns(3)
+with colD:
+    lag_min = st.number_input("最小 lag", -10, 0, -5)
+with colE:
+    lag_max = st.number_input("最大 lag", 0, 10, 5)
+with colF:
+    drop_thresh = st.number_input("大跌閾值 (%)", -20.0, 0.0, -5.0)
 
-st.sidebar.subheader("SMA 分析參數")
-sma_window = st.sidebar.slider("SMA 週期", 50, 250, 200)
+event_window = st.slider("事件前後天數", 1, 10, 3)
+st.divider()
 
 ###############################################################
 # 安全下載資料 — 處理 yfinance 格式變更與 MultiIndex
