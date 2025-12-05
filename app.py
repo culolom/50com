@@ -130,7 +130,40 @@ if submitted:
             st.plotly_chart(fig_gap, use_container_width=True)
 
             # ==========================================
-            # PART B: 穿越時間差統計 (Lag Analysis)
+            # PART B: 原始價格與 SMA 走勢對照 (新增圖表)
+            # ==========================================
+            st.subheader(f"📈 原始價格與 {sma_window}SMA 走勢對照")
+            
+            fig_price = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            # 0050 (左軸)
+            fig_price.add_trace(go.Scatter(
+                x=df.index, y=df["0050"], name="0050 收盤價",
+                line=dict(color='rgba(0,0,255,0.5)', width=1)), secondary_y=False)
+            fig_price.add_trace(go.Scatter(
+                x=df.index, y=df["SMA_50"], name=f"0050 SMA",
+                line=dict(color='blue', width=2)), secondary_y=False)
+            
+            # 00631L (右軸)
+            fig_price.add_trace(go.Scatter(
+                x=df.index, y=df["00631L"], name="00631L 收盤價",
+                line=dict(color='rgba(255,0,0,0.5)', width=1)), secondary_y=True)
+            fig_price.add_trace(go.Scatter(
+                x=df.index, y=df["SMA_L"], name=f"00631L SMA",
+                line=dict(color='red', width=2)), secondary_y=True)
+            
+            fig_price.update_layout(
+                title_text="雙軸價格走勢圖 (左軸: 0050 / 右軸: 00631L)",
+                hovermode="x unified",
+                height=500
+            )
+            fig_price.update_yaxes(title_text="0050 價格", secondary_y=False)
+            fig_price.update_yaxes(title_text="00631L 價格", secondary_y=True)
+            
+            st.plotly_chart(fig_price, use_container_width=True)
+
+            # ==========================================
+            # PART C: 穿越時間差統計 (Lag Analysis)
             # ==========================================
             st.subheader("⏱️ 穿越延遲時間統計 (Time Lag Analysis)")
             st.markdown("計算當 0050 發生穿越訊號時，00631L 是**提早 (Lead)** 還是 **延遲 (Lag)** 發生。")
@@ -227,17 +260,6 @@ if submitted:
                 ]
             }
             st.table(pd.DataFrame(summary_data))
-
-            # ==========================================
-            # PART C: 原有價格對照圖 (保留但縮小)
-            # ==========================================
-            with st.expander("查看原始價格與 SMA 走勢對照圖"):
-                fig = make_subplots(specs=[[{"secondary_y": True}]])
-                fig.add_trace(go.Scatter(x=df.index, y=df["0050"], name="0050", line=dict(color='blue', width=1)), secondary_y=False)
-                fig.add_trace(go.Scatter(x=df.index, y=df["SMA_50"], name="SMA 50", line=dict(color='lightblue', width=2)), secondary_y=False)
-                fig.add_trace(go.Scatter(x=df.index, y=df["00631L"], name="00631L", line=dict(color='red', width=1)), secondary_y=True)
-                fig.add_trace(go.Scatter(x=df.index, y=df["SMA_L"], name="SMA L", line=dict(color='pink', width=2)), secondary_y=True)
-                st.plotly_chart(fig, use_container_width=True)
 
             # ==========================================
             # 簡單總結
