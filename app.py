@@ -10,6 +10,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
+# 設定頁面資訊 (必須是第一個 Streamlit 指令)
 st.set_page_config(
     page_title="0050 vs 00631L 戰情室",
     layout="wide"
@@ -33,113 +34,140 @@ st.markdown("""
 """)
 
 ###############################################################
-# Sidebar
+# Sidebar - 參數設定
 ###############################################################
 st.sidebar.header("參數設定")
 
-start_date = st.sidebar.date_input("開始日", pd.to_datetime("2010-01-01"))
+# 預設起始日設為 2015 以確保有足夠的 00631L 資料 (00631L 成立於 2014)
+start_date = st.sidebar.date_input("開始日", pd.to_datetime("2015-01-01"))
 end_date   = st.sidebar.date_input("結束日", pd.to_datetime("today"))
 
+st.sidebar.subheader("延遲分析參數")
 lag_min = st.sidebar.number_input("最小 lag", -10, 0, -5)
 lag_max = st.sidebar.number_input("最大 lag", 0, 10, 5)
-
-sma_window = st.sidebar.slider("SMA 週期", 50, 250, 200)
-drop_thresh = st.sidebar.number_input("大跌閾值 (%)", -20.0, 0.0, -5.0)
+drop_thresh = st.sidebar.number_input("大跌閾值 (%)", -20.0, 0.0, -2.0, step=0.5, help="設定當日跌幅超過多少視為大跌事件 (輸入負值)")
 event_window = st.sidebar.slider("事件前後天數", 1, 10, 3)
 
+st.sidebar.subheader("SMA 分析參數")
+sma_window = st.sidebar.slider("SMA 週期", 50, 250, 200)
+
 ###############################################################
-# 安全下載資料 — 不會再出現 Adj Close KeyError
+# 安全下載資料 — 處理 yfinance 格式變更與 MultiIndex
 ###############################################################
 @st.cache_data
 def load_price(start, end):
+    # 下載資料，auto_adjust=False 確保我們可以明確選擇 Close 或 Adj Close
     raw = yf.download(["0050.TW", "00631L.TW"], start=start, end=end, auto_adjust=False)
 
     if raw.empty:
-        st.error("yfinance 資料為空，請調整日期。")
+        st.error("yfinance 資料為空，請調整日期或檢查網路連線。")
         st.stop()
 
-    # 多層欄位
-    if isinstance(raw.columns, pd.MultiIndex):
-        level0 = list(raw.columns.levels[0])
+    df = pd.DataFrame()
 
-        if "Adj Close" in level0:
+    # 處理 yfinance 回傳資料結構 (可能是 MultiIndex 也可能是單層)
+    if isinstance(raw.columns, pd.MultiIndex):
+        # 優先使用 Adj Close，如果沒有則使用 Close
+        if "Adj Close" in raw.columns.levels[0]:
             df = raw["Adj Close"].copy()
-        elif "Close" in level0:
+        elif "Close" in raw.columns.levels[0]:
             df = raw["Close"].copy()
         else:
-            st.error("無 Adj Close / Close 欄位")
-            st.stop()
-
+            # 嘗試直接取 level 1
+            try:
+                df = raw.xs("Adj Close", axis=1, level=0, drop_level=True)
+            except:
+                df = raw.xs("Close", axis=1, level=0, drop_level=True)
     else:
-        # 單層欄位
+        # 單層欄位處理
         if "Adj Close" in raw.columns:
             df = raw[["Adj Close"]].copy()
         elif "Close" in raw.columns:
             df = raw[["Close"]].copy()
         else:
-            st.error("資料格式異常")
-            st.stop()
-        df.columns = ["0050.TW"]
+            # 最後手段：假設只有這兩欄
+            df = raw.copy()
+    
+    # 重新命名欄位以便後續處理
+    cols_map = {}
+    for col in df.columns:
+        if "0050" in str(col):
+            cols_map[col] = "0050"
+        elif "00631L" in str(col):
+            cols_map[col] = "00631L"
+    
+    df = df.rename(columns=cols_map).dropna()
 
-    df = df.rename(columns={"0050.TW": "0050", "00631L.TW": "00631L"}).dropna()
-
+    # 檢查是否兩個標的都有資料
     if not {"0050", "00631L"} <= set(df.columns):
-        st.error("下載資料格式錯誤，欄位不完整")
+        st.error(f"下載資料欄位不完整，目前欄位: {df.columns.tolist()}，請確認代碼是否正確。")
         st.stop()
 
     return df
 
+# 載入資料
 price = load_price(start_date, end_date)
 
-st.markdown(f"資料期間：**{price.index.min().date()}** ～ **{price.index.max().date()}**")
+st.success(f"資料下載成功！區間：**{price.index.min().date()}** ～ **{price.index.max().date()}**，共 {len(price)} 筆交易日資料。")
 st.divider()
 
 ###############################################################
-# 價格走勢圖
+# 1. 價格走勢圖
 ###############################################################
 st.subheader("📈 收盤價走勢")
 
-fig_price = px.line(price, x=price.index, y=["0050", "00631L"], title="0050 vs 00631L 價格")
+fig_price = px.line(price, x=price.index, y=["0050", "00631L"], title="0050 vs 00631L 歷史價格")
 st.plotly_chart(fig_price, use_container_width=True)
 
 ###############################################################
-# 報酬率計算
+# 資料處理：報酬率計算
 ###############################################################
 ret = price.pct_change().dropna()
 ret["ret_50"] = ret["0050"]
 ret["ret_L"] = ret["00631L"]
+# 隔日報酬 (Shift -1 代表 t+1 的報酬對應到 t 的 index)
 ret["ret_L_next"] = ret["ret_L"].shift(-1)
 
-# 槓桿倍數
+# 計算槓桿倍數 (避免除以 0)
 ret["lev_same"] = np.where(ret["ret_50"] != 0, ret["ret_L"] / ret["ret_50"], np.nan)
 ret["lev_next"] = np.where(ret["ret_50"] != 0, ret["ret_L_next"] / ret["ret_50"], np.nan)
 
 ###############################################################
-# 延遲 Dashboard
+# 2. 延遲 (Delay) Dashboard
 ###############################################################
-st.header("⏱ 延遲 (Delay) Dashboard")
+st.header("⏱ 延遲 (Delay) 分析")
 
-# 相關係數
-corr_same = ret["ret_50"].corr(ret["ret_L"])
-corr_next = ret["ret_50"].corr(ret["ret_L_next"])
+# 計算相關係數
+valid_data = ret.dropna()
+corr_same = valid_data["ret_50"].corr(valid_data["ret_L"])
+corr_next = valid_data["ret_50"].corr(valid_data["ret_L_next"])
 
 colA, colB, colC, colD = st.columns(4)
 colA.metric("同日相關係數", f"{corr_same:.3f}")
-colB.metric("隔日相關係數", f"{corr_next:.3f}")
-colC.metric("同日槓桿倍數", f"{ret['lev_same'].mean():.2f}x")
-colD.metric("隔日槓桿倍數", f"{ret['lev_next'].mean():.2f}x")
+colB.metric("隔日相關係數 (T+1)", f"{corr_next:.3f}")
+colC.metric("同日槓桿倍數 (平均)", f"{valid_data['lev_same'].mean():.2f}x")
+colD.metric("隔日槓桿倍數 (平均)", f"{valid_data['lev_next'].mean():.2f}x")
 
-st.markdown("""
-📌 **如果隔日相關係數 > 同日 → 有延遲現象。**  
+st.info("""
+**解讀說明：**
+* **同日相關係數**：代表 0050 當天漲跌與 00631L 當天漲跌的連動性。
+* **隔日相關係數**：代表 0050 **今天**的漲跌與 00631L **明天**的漲跌連動性。
+* 如果 **隔日相關係數 > 同日** 或數值很高，代表有明顯的延遲反應現象。
 """)
 
 ###############################################################
 # Cross-correlation Heatmap
 ###############################################################
-st.subheader("🔁 Cross-correlation（跨日相關性）")
+st.subheader("🔁 Cross-correlation（跨日相關性熱力圖）")
 
 lags = list(range(lag_min, lag_max + 1))
-corrs = [ret["ret_50"].corr(ret["ret_L"].shift(lag)) for lag in lags]
+corrs = []
+for lag in lags:
+    # shift(-lag) 代表將未來的資料往前移，
+    # 若 lag=1, 代表 ret_L(t+1) 與 ret_50(t) 比較 -> 00631L 晚一天
+    # 若 lag=-1, 代表 ret_L(t-1) 與 ret_50(t) 比較 -> 00631L 早一天
+    c = ret["ret_50"].corr(ret["ret_L"].shift(-lag))
+    corrs.append(c)
 
 fig_corr = go.Figure(data=go.Heatmap(
     z=[corrs],
@@ -150,7 +178,11 @@ fig_corr = go.Figure(data=go.Heatmap(
     text=[[f"{c:.2f}" for c in corrs]],
     texttemplate="%{text}"
 ))
-fig_corr.update_layout(height=260, xaxis_title="Lag（+1 = 00631L 晚一天）")
+fig_corr.update_layout(
+    height=260, 
+    xaxis_title="Lag Days (+1 代表 00631L 晚一天反應)",
+    yaxis_title="相關係數"
+)
 st.plotly_chart(fig_corr, use_container_width=True)
 
 ###############################################################
@@ -161,13 +193,15 @@ st.subheader("📌 同日 vs 隔日散佈圖")
 col1, col2 = st.columns(2)
 
 with col1:
-    fig_same = px.scatter(ret, x="ret_50", y="ret_L", opacity=0.6, title="同日報酬")
-    fig_same.add_hline(y=0); fig_same.add_vline(x=0)
+    fig_same = px.scatter(ret, x="ret_50", y="ret_L", opacity=0.6, title="同日報酬 (0050 vs 00631L)")
+    fig_same.add_hline(y=0, line_width=1, line_color="black")
+    fig_same.add_vline(x=0, line_width=1, line_color="black")
     st.plotly_chart(fig_same, use_container_width=True)
 
 with col2:
-    fig_next = px.scatter(ret, x="ret_50", y="ret_L_next", opacity=0.6, title="隔日報酬")
-    fig_next.add_hline(y=0); fig_next.add_vline(x=0)
+    fig_next = px.scatter(ret, x="ret_50", y="ret_L_next", opacity=0.6, title="隔日報酬 (0050[t] vs 00631L[t+1])")
+    fig_next.add_hline(y=0, line_width=1, line_color="black")
+    fig_next.add_vline(x=0, line_width=1, line_color="black")
     st.plotly_chart(fig_next, use_container_width=True)
 
 ###############################################################
@@ -175,31 +209,49 @@ with col2:
 ###############################################################
 st.subheader("📉 大跌事件對齊（00631L 是否隔天補跌？）")
 
-mask_drop = ret["ret_50"] <= drop_thresh / 100
+# 篩選大跌事件
+mask_drop = ret["ret_50"] <= (drop_thresh / 100.0)
 drop_dates = ret.index[mask_drop]
 
-st.markdown(f"符合大跌條件的事件：**{len(drop_dates)} 天**")
+st.markdown(f"符合大跌條件（0050 當日跌幅 < {drop_thresh}%）的事件共：**{len(drop_dates)} 次**")
 
 records = []
-for d in drop_dates:
-    win = pd.date_range(d - timedelta(days=event_window),
-                        d + timedelta(days=event_window))
-    for t in win:
-        if t in ret.index:
-            records.append({
-                "offset": (t - d).days,
-                "ret_L": ret.loc[t, "ret_L"]
-            })
+if len(drop_dates) > 0:
+    for d in drop_dates:
+        # 取前後 N 天的視窗
+        win_start = d - timedelta(days=event_window)
+        win_end = d + timedelta(days=event_window)
+        
+        # 使用索引切片，避免假日問題
+        # 這裡簡單使用 date_range 會遇到假日沒有資料的問題，改用 index search
+        try:
+            loc_idx = ret.index.get_loc(d)
+            # 確保索引不越界
+            start_idx = max(0, loc_idx - event_window)
+            end_idx = min(len(ret) - 1, loc_idx + event_window)
+            
+            subset = ret.iloc[start_idx : end_idx + 1]
+            
+            for t in subset.index:
+                # 計算相對天數 (Trading days diff)
+                offset = subset.index.get_loc(t) - subset.index.get_loc(d)
+                records.append({
+                    "offset": offset,
+                    "ret_L": subset.loc[t, "ret_L"]
+                })
+        except KeyError:
+            continue
 
-if len(records):
+if len(records) > 0:
     df_evt = pd.DataFrame(records).groupby("offset")["ret_L"].mean().reset_index()
     fig_evt = px.line(df_evt, x="offset", y="ret_L", markers=True,
-                      title="00631L 在 0050 大跌附近的平均報酬")
-    fig_evt.add_vline(x=0, line_dash="dash", line_color="black")
-    fig_evt.add_vline(x=1, line_dash="dot", line_color="red")
+                      title="00631L 在 0050 大跌日(Day 0)前後的平均報酬表現")
+    fig_evt.add_vline(x=0, line_dash="dash", line_color="black", annotation_text="Event Day")
+    fig_evt.add_vline(x=1, line_dash="dot", line_color="red", annotation_text="Next Day")
+    fig_evt.update_layout(xaxis_title="Trading Days Offset", yaxis_title="Average Return (00631L)")
     st.plotly_chart(fig_evt, use_container_width=True)
 else:
-    st.info("事件太少，無法繪圖。")
+    st.info("事件太少或無資料，無法繪製對齊圖。")
 
 st.divider()
 
@@ -209,90 +261,95 @@ st.divider()
 st.header("📈 200SMA 穿越統計 Dashboard")
 
 sma = price.rolling(sma_window).mean()
-above = price > sma  # 是否在 SMA 上方
+above = price > sma  # 是否在 SMA 上方 (Boolean Series)
 
 def detect_cross(series_bool):
+    # True 代表在 SMA 上方，False 代表在下方
+    # shift(1) 是昨天，所以：昨天 False 且 今天 True = 向上突破
     cross_up = (series_bool.shift(1) == False) & (series_bool == True)
+    # 昨天 True 且 今天 False = 向下跌破
     cross_dn = (series_bool.shift(1) == True) & (series_bool == False)
+    
     return cross_up[cross_up].index, cross_dn[cross_dn].index
 
 up_50, dn_50 = detect_cross(above["0050"])
 up_L2, dn_L2 = detect_cross(above["00631L"])
 
-def match_cross(a, b, days=5):
+st.markdown(f"**統計結果 (SMA {sma_window})**：")
+colS1, colS2 = st.columns(2)
+colS1.info(f"0050 向上突破次數: {len(up_50)} | 向下跌破次數: {len(dn_50)}")
+colS2.info(f"00631L 向上突破次數: {len(up_L2)} | 向下跌破次數: {len(dn_L2)}")
+
+def match_cross(a_dates, b_dates, tolerance=10):
+    """
+    對每個 a 的發生日，找最近的一個 b 發生日，計算 (b - a) 的天數差。
+    Tolerance: 只找前後 X 天內的配對
+    """
     diffs = []
-    for d in a:
-        win = pd.date_range(d - timedelta(days=days),
-                            d + timedelta(days=days))
-        cand = [x for x in b if x in win]
-        if cand:
-            diffs.append((cand[0] - d).days)
+    # 為了避免重複配對，可以簡單做，也可以做複雜配對。這裡採用簡單：找最近的一個。
+    for d in a_dates:
+        # 篩選在容許範圍內的 b 日期
+        candidates = [x for x in b_dates if abs((x - d).days) <= tolerance]
+        if candidates:
+            # 找絕對值最小的 (最近的)
+            closest = min(candidates, key=lambda x: abs((x - d).days))
+            diff = (closest - d).days
+            diffs.append(diff)
     return diffs
 
-diff_up = match_cross(up_50, up_L2, days=5)
-diff_dn = match_cross(dn_50, dn_L2, days=5)
+# 這裡以 0050 為基準 (Day 0)，看 00631L 差幾天
+diff_up = match_cross(up_50, up_L2, tolerance=15)
+diff_dn = match_cross(dn_50, dn_L2, tolerance=15)
 
-def win_rate(diff, mode):
-    if len(diff) == 0:
-        return None, None
-    if mode == "up":
-        # 0050先突破 → diff < 0
-        f50 = sum(d < 0 for d in diff)
-        fL2 = sum(d > 0 for d in diff)
-    else:
-        # 下跌 00631L 先跌破 → diff < 0
-        fL2 = sum(d < 0 for d in diff)
-        f50 = sum(d > 0 for d in diff)
-    total = len(diff)
-    return f50 / total * 100, fL2 / total * 100
+# 勝率統計 (這裡定義勝率為：誰先反應)
+# 向上：0050 先突破 (diff > 0, 00631L 晚) vs 00631L 先突破 (diff < 0)
+# 向下：00631L 先跌破 (diff > 0, 0050 晚 ? 不對，邏輯相反)
+# 讓 diff = Date(L) - Date(50)
+# 若 diff > 0: 00631L 比較晚 (Date L > Date 50) -> 0050 先
+# 若 diff < 0: 00631L 比較早 (Date L < Date 50) -> 00631L 先
 
-up_50_win, up_L2_win = win_rate(diff_up, "up")
-dn_50_win, dn_L2_win = win_rate(diff_dn, "down")
+def calc_win_stats(diffs):
+    if not diffs: return 0, 0, 0
+    n = len(diffs)
+    L_lead = sum(1 for d in diffs if d < 0) # L 日期比較小，L 先
+    tie    = sum(1 for d in diffs if d == 0)
+    Fifty_lead = sum(1 for d in diffs if d > 0) # L 日期比較大，50 先
+    return (Fifty_lead/n)*100, (L_lead/n)*100, (tie/n)*100
 
-colU, colD = st.columns(2)
-with colU:
-    st.metric("0050 上漲突破勝率", f"{up_50_win:.1f}%")
-    st.metric("00631L 上漲突破勝率", f"{up_L2_win:.1f}%")
+u50_pct, uL_pct, uTie_pct = calc_win_stats(diff_up)
+d50_pct, dL_pct, dTie_pct = calc_win_stats(diff_dn)
 
-with colD:
-    st.metric("00631L 下跌跌破勝率", f"{dn_L2_win:.1f}%")
-    st.metric("0050 下跌跌破勝率", f"{dn_50_win:.1f}%")
+st.subheader("🏁 誰先反應？ (Win Rate Analysis)")
 
-###############################################################
-# Histogram of diff
-###############################################################
-st.subheader("📉 下跌：誰先跌破 200SMA（日差）")
+colW1, colW2 = st.columns(2)
 
-if len(diff_dn):
-    fig_dn = px.histogram(diff_dn, nbins=20,
-                          title="跌破差距 Histogram（負值代表 00631L 更早跌破）")
-    st.plotly_chart(fig_dn, use_container_width=True)
-else:
-    st.info("無下跌事件")
+with colW1:
+    st.markdown("### 🚀 向上突破 SMA")
+    st.write(f"**0050 先突破**: {u50_pct:.1f}%")
+    st.write(f"**00631L 先突破**: {uL_pct:.1f}%")
+    st.write(f"同步突破: {uTie_pct:.1f}%")
+    if len(diff_up) > 0:
+        fig_hist_up = px.histogram(x=diff_up, nbins=20, labels={'x': '日差 (天)'}, 
+                                   title="突破日差 (正值=0050先, 負值=00631L先)")
+        fig_hist_up.add_vline(x=0, line_color="black")
+        st.plotly_chart(fig_hist_up, use_container_width=True)
 
-st.subheader("📈 上漲：誰先突破 200SMA（日差）")
-
-if len(diff_up):
-    fig_up = px.histogram(diff_up, nbins=20,
-                          title="突破差距 Histogram（負值代表 0050 更早突破）")
-    st.plotly_chart(fig_up, use_container_width=True)
-else:
-    st.info("無上漲事件")
-
-###############################################################
-# END
-###############################################################
+with colW2:
+    st.markdown("### 🔻 向下跌破 SMA")
+    st.write(f"**0050 先跌破**: {d50_pct:.1f}%")
+    st.write(f"**00631L 先跌破**: {dL_pct:.1f}%")
+    st.write(f"同步跌破: {dTie_pct:.1f}%")
+    if len(diff_dn) > 0:
+        fig_hist_dn = px.histogram(x=diff_dn, nbins=20, labels={'x': '日差 (天)'},
+                                   title="跌破日差 (正值=0050先, 負值=00631L先)")
+        fig_hist_dn.add_vline(x=0, line_color="black")
+        st.plotly_chart(fig_hist_dn, use_container_width=True)
 
 st.markdown("""
 ---
-### 🎯 **最終結論（你觀察到的現象完全符合）**
+### 🎯 **結論參考**
 
-- **下跌時（跌破 200SMA）→ 00631L 會比較早跌破**  
-  → 因為槓桿放大波動，下跌訊號更敏感  
-
-- **上漲時（突破 200SMA）→ 0050 會比較早突破**  
-  → 因為槓桿 ETF 有波動折損，均線彎得慢、上漲滯後  
-
-這份 Dashboard 可以清楚證明：
-👉 **槓桿 ETF 的方向敏感度是不對稱的：下跌快、上漲慢。**
+1.  **下跌時**：理論上 **00631L (2倍槓桿)** 因為波動放大，稍微下跌就會觸碰均線，應該會 **"先跌破"** (L先的比例較高)。
+2.  **上漲時**：因為波動耗損 (Volatility Decay)，2倍槓桿在震盪後的淨值回復較慢，理論上 **0050** 應該會 **"先突破"**。
+3.  **日差分佈**：觀察 Histogram，如果分佈重心偏左 (負值)，代表 00631L 動作快；偏右 (正值)，代表 0050 動作快。
 """)
