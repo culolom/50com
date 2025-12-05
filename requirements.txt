@@ -8,3 +8,4 @@ matplotlib
 python-dateutil
 requests
 streamlit-lightweight-charts
+seaborn
